@@ -20,12 +20,12 @@ Many developers confuse Docker Desktop with Docker itself. Here is the architect
 
 - **Docker Engine (The Brain):** The native background daemon (`dockerd`) and the CLI (`docker`). On Linux, this runs directly on the metal, utilizing the host OS kernel. It is incredibly fast and lightweight.
 - **Docker Desktop:** A GUI wrapper built for Windows and Mac. Because Docker requires a Linux kernel, Docker Desktop secretly spins up a **hidden Linux Virtual Machine** (VM).
-- **The Takeaway:** As a Linux user, using Docker Desktop means you are unnecessarily running a Virtual Machine inside an OS that already has the required kernel. Stick to the pure Native Docker Engine and CLI.
+- **The Takeaway:** As a Linux user, using Docker Desktop means we are unnecessarily running a Virtual Machine inside an OS that already has the required kernel. Stick to the pure Native Docker Engine and CLI.
 
 ### 2. Images vs. Containers
 
 - **Image (The Blueprint):** A read-only, dead file containing the filesystem, libraries, and tools.
-- **Container (The House):** A living, breathing process created from an image blueprint. You can spin up 100 identical containers from a single image.
+- **Container (The House):** A living, breathing process created from an image blueprint. We can spin up 100 identical containers from a single image.
 
 ### 3. Userland vs. The Kernel
 
@@ -39,7 +39,7 @@ If I download an `ubuntu` image from Docker Hub, is it a full OS? **No.**
 
 Since containers share the host kernel, how does an `ubuntu` container run on a Mac or Windows machine if they don't have a Linux kernel?
 
-- **The Trick:** Docker Desktop runs a tiny, invisible, custom Linux OS (like `LinuxKit` or via `WSL2`) in the background. When you spin up 10 containers on a Mac, they do not run on the Mac's Darwin kernel—they all share the virtual kernel of that single hidden Linux VM.
+- **The Trick:** Docker Desktop runs a tiny, invisible, custom Linux OS (like `LinuxKit` or via `WSL2`) in the background. When we spin up 10 containers on a Mac, they do not run on the Mac's Darwin kernel—they all share the virtual kernel of that single hidden Linux VM.
 
 ---
 
@@ -97,6 +97,56 @@ sudo docker run hello-world
 ```
 
 This command downloads a test image and runs it in a container. When the container runs, it prints a confirmation message and exits.
+
+---
+
+## 🕹️ Day 2: The CLI, Engine APIs, and Lifecycle
+
+Moving from installation to actual container management, it is crucial to understand _how_ commands execute under the hood.
+
+### 1. The Client-Server Architecture
+
+When we type a command in our terminal, the Docker CLI doesn't actually do the heavy lifting.
+
+- **The Docker Engine (Daemon):** Runs constantly in the background as a system service. It listens for REST API requests to create, modify, or destroy containers.
+- **The CLI:** Acts as a pure messenger. It takes our terminal command, translates it into an API request, and sends it to the Engine.
+- **Linux Systemd Control:** Because the Engine is a background daemon, it is controlled by Linux's system manager (`systemd`). We can manage the Engine itself with standard Linux commands:
+  ```bash
+  sudo systemctl status docker  # Check if the brain is awake
+  sudo systemctl stop docker    # Put the brain to sleep
+  sudo systemctl start docker   # Wake it back up
+  ```
+
+### 2. Revisiting Images vs. Containers
+
+To lock in the mental model:
+
+- An **Image** is a static, shared configuration blueprint.
+- A **Container** is an isolated runtime environment.
+  When we use `docker run`, Docker takes that single, shared image configuration and spins up a brand new, strictly isolated runtime environment. We can have 100 isolated containers safely running off the exact same configuration image.
+
+### 3. Decrypting `docker run -it`
+
+The command `docker run -it ubuntu` is the standard way to "teleport" inside a container. But what do those flags actually do?
+First, the `run` command checks if the `ubuntu` image exists locally. If not, it pulls it from Docker Hub, creates a new container, and starts it.
+
+- `-i` (**Interactive**): Tells Docker to keep **STDIN** (Standard Input) open even if not attached. This allows us to actually type commands into the container.
+- `-t` (**TTY**): Allocates a pseudo-TTY (Teletype). This tells Docker to format the output with standard terminal UI features (like command prompts, text coloring, and line wrapping) so it seamlessly blends into our host terminal.
+
+### 4. The Command Evolution (Aliases)
+
+We will often see tutorials use different commands to do the exact same thing (e.g., `docker ps` vs `docker container ls`).
+
+**The Deep Why:** In older versions of Docker, commands were thrown together randomly (`docker ps`, `docker rm`). In Docker 1.13, the developers decided to professionally restructure the CLI to be grouped by object (`docker container ...`, `docker image ...`, `docker network ...`).
+
+However, to prevent breaking scripts written by millions of developers, they kept the old commands as permanent **Aliases**. They are identical features, just different ways to type them:
+
+| Classic Command (Alias) | Modern Management Command  | Action                                  |
+| :---------------------- | :------------------------- | :-------------------------------------- |
+| `docker ps`             | `docker container ls`      | List running containers                 |
+| `docker ps -a`          | `docker container ls -a`   | List all containers (running & stopped) |
+| `docker rm [id]`        | `docker container rm [id]` | Delete a container                      |
+| `docker images`         | `docker image ls`          | List locally downloaded images          |
 
 ---
 
