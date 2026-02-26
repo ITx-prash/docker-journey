@@ -148,6 +148,56 @@ However, to prevent breaking scripts written by millions of developers, they kep
 | `docker rm [id]`        | `docker container rm [id]` | Delete a container                      |
 | `docker images`         | `docker image ls`          | List locally downloaded images          |
 
+## 🕵️ Day 3: Processes, Minimal Images, and The Container Lifecycle
+
+Today focuses on the internal mechanics of how containers execute commands, why images behave the way they do, and how Docker operates on different OS kernels under the hood.
+
+### 1. The "Booting" Myth and PID 1
+A container does not "boot" like a Virtual Machine. There is no OS startup sequence. 
+*   **The Reality:** A container is simply an isolated Linux process. 
+*   **The PID 1 Rule:** The command you pass to a container (or its default `CMD`) becomes **Process ID 1 (PID 1)** inside that isolated environment. 
+*   **The Lifecycle Rule:** A container lives exactly as long as its PID 1 lives. 
+    *   `docker run ubuntu bash`: `bash` stays open, so the container stays running.
+    *   `docker run ubuntu ls`: `ls` lists files and exits in 0.1 seconds, so the container instantly dies.
+    *   `docker run ubuntu ping google.com`: `ping` runs indefinitely, so the container stays alive until you stop it.
+
+### 2. Why `ping` Failed: The Nature of Base Images
+Running `docker run ubuntu ping google.com` throws an error: `executable file not found in $PATH`. 
+*   **The Deep Why:** Container images are strictly minimal by design to reduce attack surfaces and download sizes. The official Ubuntu Docker image is stripped of common networking tools. 
+*   **Base Image Variants:**
+    *   **Ubuntu (~70MB):** A minimal general-purpose distro. Requires `apt update && apt install iputils-ping`.
+    *   **Alpine (~7MB):** An ultra-lightweight distro using `musl` and `apk`. Built specifically for production containers. Includes `ping` by default.
+    *   **BusyBox (~2MB):** Not a full OS. It is a single, tiny binary toolkit that bundles core Unix utilities (including `ping` and `sh`). Perfect for debugging.
+
+### 3. Immutability and Overriding Commands
+If you run `docker run ubuntu ls`, does it permanently change the image so it always runs `ls`? **Absolutely not.**
+*   **Inspecting the Blueprint:** You can view an image's default configuration by running `docker image inspect ubuntu`. Inside the JSON, the `Cmd` key is set to `["bash"]`. 
+*   **The Override:** When you add `ls` to the CLI, Docker creates a *container-specific* configuration overriding the default `Cmd`. 
+*   **Immutability:** Images are strictly read-only. Modifying a command or installing a package inside a container *only* affects that specific container's invisible writable layer. The base image on your hard drive is never altered.
+
+### 4. Running Pre-made Containers (`run` vs `start`)
+The `docker run` command is strictly for creating *brand new* containers. 
+*   **`docker run`:** Pulls the image (if missing) ➡️ Creates the writable layer ➡️ Starts the process.
+*   **`docker start [id]`:** Wakes up an existing, stopped container. It re-uses the exact same writable layer and configuration (like an overridden `ls` command) that was generated when it was first created.
+*   **`docker exec -it [id] bash`:** Teleports into a container that is *already running* by spawning a secondary process alongside PID 1.
+
+### 5. Essential Management Commands
+As containers and images pile up, lifecycle management becomes critical:
+
+| Command | Action | The "Deep Why" / Engineering Context |
+| :--- | :--- | :--- |
+| `docker image inspect` | View metadata | Exposes the raw JSON manifest (Env variables, Entrypoints, Cmds). |
+| `docker rm [id]` | Delete container | Wipes the container's metadata and its specific writable layer from disk. |
+| `docker rmi [image]` | Delete image | Fails if any container (even a stopped one) is currently based on it, as the container relies on that read-only base layer. |
+| `docker stop [id]` | Graceful shutdown | Sends a `SIGTERM` signal to PID 1, allowing the app to save data before exiting. |
+| `docker kill [id]` | Force shutdown | Sends a `SIGKILL` signal to PID 1, terminating it instantly without warning. |
+| `docker system prune` | Clean up | Automatically deletes all stopped containers, unused networks, and dangling images to free up disk space. |
+
+### 6. Cross-Platform Execution Under the Hood (WSL2 & macOS)
+Because containers *require* a Linux kernel (for Namespaces, Cgroups, and OverlayFS), Docker uses deeply integrated Hypervisors on Mac and Windows to fake a native environment.
+*   **Windows (WSL2):** Docker uses Microsoft's *Lightweight Utility VM*. It boots a highly optimized Linux kernel in <1 second via Hyper-V. The `dockerd` daemon and your container's OverlayFS files live inside hidden, dedicated WSL2 distros (`docker-desktop-data`).
+*   **macOS:** Uses Apple's native `Virtualization.framework`. Docker boots a highly secretive, ultra-minimalist Linux distribution called **LinuxKit** in the background. It uses **VirtioFS** to share files between the Mac hard drive and the Linux VM at near-native speeds.
+
 ---
 
 <p align="center" dir="auto">
