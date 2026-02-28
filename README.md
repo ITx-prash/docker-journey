@@ -148,6 +148,8 @@ However, to prevent breaking scripts written by millions of developers, they kep
 | `docker rm [id]`        | `docker container rm [id]` | Delete a container                      |
 | `docker images`         | `docker image ls`          | List locally downloaded images          |
 
+---
+
 ## 🕵️ Day 3: Processes, Minimal Images, and The Container Lifecycle
 
 Today focuses on the internal mechanics of how containers execute commands, why images behave the way they do, and how Docker operates on different OS kernels under the hood.
@@ -157,11 +159,11 @@ Today focuses on the internal mechanics of how containers execute commands, why 
 A container does not "boot" like a Virtual Machine. There is no OS startup sequence.
 
 - **The Reality:** A container is simply an isolated Linux process.
-- **The PID 1 Rule:** The command you pass to a container (or its default `CMD`) becomes **Process ID 1 (PID 1)** inside that isolated environment.
+- **The PID 1 Rule:** The command we pass to a container (or its default `CMD`) becomes **Process ID 1 (PID 1)** inside that isolated environment.
 - **The Lifecycle Rule:** A container lives exactly as long as its PID 1 lives.
   - `docker run ubuntu bash`: `bash` stays open, so the container stays running.
   - `docker run ubuntu ls`: `ls` lists files and exits in 0.1 seconds, so the container instantly dies.
-  - `docker run ubuntu ping google.com`: `ping` runs indefinitely, so the container stays alive until you stop it.
+  - `docker run ubuntu ping google.com`: `ping` runs indefinitely, so the container stays alive until we stop it.
 
 ### 2. Why `ping` Failed: The Nature of Base Images
 
@@ -175,11 +177,11 @@ Running `docker run ubuntu ping google.com` throws an error: `executable file no
 
 ### 3. Immutability and Overriding Commands
 
-If you run `docker run ubuntu ls`, does it permanently change the image so it always runs `ls`? **Absolutely not.**
+If we run `docker run ubuntu ls`, does it permanently change the image so it always runs `ls`? **Absolutely not.**
 
-- **Inspecting the Blueprint:** You can view an image's default configuration by running `docker image inspect ubuntu`. Inside the JSON, the `Cmd` key is set to `["bash"]`.
-- **The Override:** When you add `ls` to the CLI, Docker creates a _container-specific_ configuration overriding the default `Cmd`.
-- **Immutability:** Images are strictly read-only. Modifying a command or installing a package inside a container _only_ affects that specific container's invisible writable layer. The base image on your hard drive is never altered.
+- **Inspecting the Blueprint:** We can view an image's default configuration by running `docker image inspect ubuntu`. Inside the JSON, the `Cmd` key is set to `["bash"]`.
+- **The Override:** When we add `ls` to the CLI, Docker creates a _container-specific_ configuration overriding the default `Cmd`.
+- **Immutability:** Images are strictly read-only. Modifying a command or installing a package inside a container _only_ affects that specific container's invisible writable layer. The base image on our hard drive is never altered.
 
 ### 4. Running Pre-made Containers (`run` vs `start`)
 
@@ -209,16 +211,18 @@ Because containers _require_ a Linux kernel (for Namespaces, Cgroups, and Overla
 - **Windows (WSL2):** Docker uses Microsoft's _Lightweight Utility VM_. It boots a highly optimized Linux kernel in <1 second via Hyper-V. The `dockerd` daemon and your container's OverlayFS files live inside hidden, dedicated WSL2 distros (`docker-desktop-data`).
 - **macOS:** Uses Apple's native `Virtualization.framework`. Docker boots a highly secretive, ultra-minimalist Linux distribution called **LinuxKit** in the background. It uses **VirtioFS** to share files between the Mac hard drive and the Linux VM at near-native speeds.
 
+---
+
 ## 🏗️ Day 4: Custom Images, Dockerfiles, and Layer Architecture
 
-Today’s focus shifted from consuming existing images to engineering custom ones. Explored how file systems are modified, how changes are saved, and the "Deep Why" behind Docker's layer-caching mechanism.
+Today’s focus shifted from consuming existing images to engineering custom ones. We explored how file systems are modified, how changes are saved, and the step-by-step process of translating a recipe into a built image.
 
 ### 1. Modifying Containers: The "Amateur" vs. The "Professional" Way
 
 When we pull a base image (like `ubuntu` or `kali-rolling`) and install new packages inside its container, those packages are saved in the container's temporary Writable Layer. How do we save them permanently?
 
 - **The Amateur Way (`docker commit`):**
-  You can freeze a container's writable layer into a brand new image using `docker commit <container_id> custom-name`.
+  We can freeze a container's writable layer into a brand new image using `docker commit <container_id> custom-name`.
   - _Pros:_ Great for quickly saving a personalized Pentesting Lab (like a Kali setup with gigabytes of manually installed tools).
   - _Cons:_ It creates a **Black Box**. No other developer knows exactly what commands you ran to build it, making it impossible to reproduce reliably.
 
@@ -260,6 +264,103 @@ WORKDIR /home/app/
 RUN npm install
 ```
 
+### 4. Building and Running the Custom Image
+
+With the Dockerfile written, we use `docker build` to execute every instruction and produce a final image.
+
+```bash
+docker build -t my-node-app .
+```
+
+- **`-t my-node-app`:** Tags the resulting image with a human-readable name. Without this, we would have to reference the image by its raw SHA-256 hash.
+- **`.` (The Build Context):** This tells Docker to send the _current directory_ (and all its files) to the Docker Engine. The `COPY` instructions inside the Dockerfile can only access files within this context. Think of it as the "ingredient box" that the Engine's builder can pull from.
+
+Every `RUN`, `COPY`, and `ADD` instruction in the Dockerfile produces a new **read-only layer**. Docker stacks these layers one by one, from top to bottom, to form the final image. _(Note: We will explore the massive performance implications of how Docker caches these layers in Day 5!)_
+
+Once the build completes, the new image appears in our local registry:
+
+```bash
+docker images
+```
+
+To spin up a container from the freshly built image:
+
+```bash
+docker run -it my-node-app
+```
+
+---
+
+## ⚡ Day 5: Build Optimization, Caching, and Terminal Internals
+
+Writing a `Dockerfile` that works is easy. Writing a `Dockerfile` that builds in milliseconds requires understanding how the Docker Engine hashes and caches layers. Today's focus was on optimizing image size and build speed.
+
+### 1. Base Image Selection (Shedding the Weight)
+
+Our initial Dockerfile used `ubuntu` as the base image. While effective, it required manual installation of `curl`, setup scripts, and `nodejs`, resulting in a heavy image.
+
+- **The Optimization:** We switched the base image to `FROM node:24-alpine3.23`.
+- **The Deep Why:** Alpine Linux is an ultra-lightweight distribution built specifically for containers (the base OS is only ~5MB). By using the official Node/Alpine image, we instantly remove the need to manually install dependencies. It drastically reduces the image size, download time, and security attack surface.
+
+### 2. The Golden Rule of Layer Caching
+
+Every instruction in a Dockerfile (`FROM`, `COPY`, `RUN`) creates a new layer. Docker caches these layers to speed up future builds. However, there is a strict rule: **If a layer's cache is invalidated (because a file changed), every single layer below it is also invalidated and forced to rebuild.**
+
+#### The "Amateur" Structure (Slow Builds)
+
+```dockerfile
+# ❌ BAD: Copying everything at once
+COPY . /app
+WORKDIR /app
+RUN npm install
+```
+
+- _Why it fails:_ If you fix a single typo in `index.js`, the `COPY . /app` layer changes. Docker invalidates the cache, forcing `npm install` to run again, which could take minutes just to download `node_modules`.
+
+#### The "Professional" Structure (Instant Builds)
+
+```dockerfile
+# ✅ GOOD: Strategic Ordering
+FROM node:24-alpine3.23
+WORKDIR /home/app/
+
+# 1. Copy ONLY the package files first
+COPY package*.json ./
+# 2. Install dependencies
+RUN npm install
+# 3. Copy the source code LAST
+COPY index.js .
+
+CMD["npm", "start"]
+```
+
+- _The Deep Why:_ Source code changes 100x more frequently than dependencies. By placing `COPY package*.json ./` and `RUN npm install` at the top, they remain safely cached. When you modify `index.js`, Docker skips the `npm install` step entirely and only takes 0.1 seconds to create the final source code layer. **Order matters immensely.**
+
+### 3. `RUN` vs. `CMD`
+
+- **`RUN npm install`:** Executes _during the build process_. Its output gets permanently frozen into a Read-Only Image Layer.
+- **`CMD ["npm", "start"]`:** Does _nothing_ during the build process. It simply adds a metadata tag to the Image telling Docker: _"When someone spins up a container from this image, make this command PID 1."_
+
+---
+
+### 💡 Did You Know? (Engineering Trivia)
+
+**Terminals vs. Shells vs. The Kernel**
+
+Developers often use the words "Terminal" and "Shell" interchangeably, but they are completely different layers of the OS architecture:
+
+1.  **The Kernel (The Brain):** Understands only binary and C System Calls. It manages the actual CPU and RAM.
+2.  **The Shell (The Backend/Translator):** Programs like `bash`, `zsh`, or `fish`. They take human text commands (`mkdir`), translate them into Kernel System Calls, and return the result.
+3.  **The Terminal (The Frontend UI):** Programs like GNOME Terminal, Alacritty, or Windows Terminal. They are simply graphical text boxes. They capture your physical keystrokes and draw pixels on your screen.
+
+**How it connects to Docker (`-it`):**
+When you run `docker run -it ubuntu bash`, you are wiring these layers across isolated environments:
+
+- `-i` (Interactive): Plugs the `stdin` (Standard Input) pipe of your host's Terminal directly into the container's Shell.
+- `-t` (TTY / Teletype): Tells Docker to create a Pseudo-Terminal (PTY) connection. This ensures the container's Shell formats its text output correctly so your host's Terminal UI can render colors and prompts perfectly.
+
+---
+
 <p align="center" dir="auto">
 	<a target="_blank" rel="noopener noreferrer" href="https://github.com/ITx-prash/docker-journey/blob/main/assets/coder.png"><img src="https://raw.githubusercontent.com/ITx-prash/floweave/main/assets/coder.png" height="150" alt="Coder illustration" style="max-width: 100%; height: auto; max-height: 150px;"></a>
 	<br>
@@ -269,4 +370,3 @@ RUN npm install
 	<br><br>
 	<a href="https://github.com/ITx-prash/docker-journey/blob/main/LICENSE"><img src="https://img.shields.io/static/v1.svg?style=for-the-badge&label=License&message=MIT&logoColor=a6e3a1&colorA=1e1e2e&colorB=a6e3a1" style="max-width: 100%;"></a>
 </p>
-```
