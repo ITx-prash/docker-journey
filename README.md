@@ -343,7 +343,7 @@ CMD["npm", "start"]
 
 ---
 
-### 💡 Did You Know? (Engineering Trivia)
+### 💡 Did You Know?
 
 **Terminals vs. Shells vs. The Kernel**
 
@@ -358,6 +358,57 @@ When you run `docker run -it ubuntu bash`, you are wiring these layers across is
 
 - `-i` (Interactive): Plugs the `stdin` (Standard Input) pipe of your host's Terminal directly into the container's Shell.
 - `-t` (TTY / Teletype): Tells Docker to create a Pseudo-Terminal (PTY) connection. This ensures the container's Shell formats its text output correctly so your host's Terminal UI can render colors and prompts perfectly.
+
+---
+## 🌐 Day 6: Networking, Port Mapping, and Ephemeral Containers
+
+By default, a Docker container is a completely isolated environment. Today, I explored how to punch holes through that isolation to allow outside traffic in, and how to manage the lifecycle of background server processes.
+
+### 1. The Network Namespace Problem (`-p`)
+If we run a Node.js server listening on port 8000 inside a container, we cannot access it by typing `localhost:8000` in our host machine's web browser. 
+*   **The Deep Why:** Because of Linux Network Namespaces, the container has its own private IP address and network stack. `localhost` inside the container is completely separate from `localhost` on our physical machine.
+*   **The Solution:** We use manual port mapping with the `-p` (lowercase) flag to bridge the two worlds.
+
+```bash
+# Syntax: -p <HOST_PORT>:<CONTAINER_PORT>
+docker run -it -p 3000:8000 alpine-node-base:latest
+```
+This tells the Docker Engine: *"Listen on port 3000 on my host machine. If any traffic arrives there, instantly teleport it to port 8000 inside this specific container."* 
+*(We can also chain multiple ports: `-p 8000:8000 -p 2000:4000 -p 2001:5000`)*.
+
+### 2. The `EXPOSE` Keyword (The Documentation Myth)
+We updated our `Dockerfile` to include the `EXPOSE` keyword:
+
+```dockerfile
+# ... previous steps ...
+COPY index.js .
+
+# Documenting the listening port
+EXPOSE 8000
+CMD["npm", "start"]
+```
+*   **The Truth About `EXPOSE`:** Writing `EXPOSE 8000` does absolutely *nothing* to the host network. It does not magically open ports or breach security. 
+*   **Why use it?** It is simply a piece of JSON metadata embedded in the image. It serves as documentation so other developers don't have to read our source code to guess which port the app runs on.
+
+### 3. Automatic Port Mapping (`-P`)
+If we are deploying 100 containers, writing `-p` manually for each one will cause port collisions (we can't map two containers to host port 3000). 
+*   **The Solution:** We use the `-P` (capital P) flag combined with the `EXPOSE` keyword.
+
+```bash
+docker run -it -P alpine-node-base:latest
+```
+*   **How it works:** When Docker sees `-P`, it reads the image metadata, finds `EXPOSE 8000`, and automatically assigns a random, high-numbered ephemeral port from our host machine (e.g., `32768`) and maps it to the container's `8000`. We can view the dynamically assigned port by running `docker ps`.
+*(Note: We can also expose ranges in the Dockerfile, such as `EXPOSE 8000-8009`).*
+
+### 4. Ephemeral Containers (`--rm` and `-d`)
+When developing server applications, our terminals can quickly become cluttered, and our hard drives can fill up with stopped "dead" containers. We solve this by combining specific lifecycle flags:
+
+```bash
+docker run -itd -P --rm alpine-node-base:latest
+```
+*   **`-d` (Detached Mode):** Instead of the server logs hijacking our terminal, the container runs invisibly in the background as a daemon. We immediately get our terminal prompt back to do other work.
+*   **`--rm` (Auto-Cleanup):** Normally, when a container stops, its metadata and writable layer stay on the hard drive forever until we run `docker rm`. The `--rm` flag tells Docker: *"This container is ephemeral (temporary). The exact second it stops, automatically delete all traces of it from the system."*
+
 
 ---
 
