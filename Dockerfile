@@ -24,5 +24,7 @@ RUN npm install
 # Copying the source code to docker
 COPY index.js  index.js
 
+#just for doc purposes, but not just directly expose this port on host unless with -P flag 
+EXPOSE 8000
 # We can also specify what to run when the container starts
 CMD ["npm","start"]
