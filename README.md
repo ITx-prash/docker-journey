@@ -1,11 +1,23 @@
 <div align="center">
-  <img src="https://www.vectorlogo.zone/logos/docker/docker-ar21.svg" width="250" alt="Docker Logo"><br>
-  <h1>Docker Journey</h1>
-  <p><em>Documenting my deep-dive into the core architecture, concepts, and internal workings of Docker from the ground up.</em></p>
 
-  <a href="https://github.com/ITx-prash/docker-journey/issues">
-    <img src="https://img.shields.io/static/v1?style=for-the-badge&label=&message=Report%20Issue&colorA=1e1e2e&colorB=89dceb&logo=gitbook&logoColor=89dceb" alt="Report Issue">
-  </a>
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/docker/docker-original.svg" width="90" alt="Docker" />
+
+<h1>Docker Journey</h1>
+
+<p><em>Deep-diving into how Docker actually works —<br>from Linux internals to production-ready Dockerfiles.</em></p>
+
+<p>
+    <a href="https://github.com/ITx-prash/docker-journey/issues">
+      <img src="https://img.shields.io/static/v1?style=for-the-badge&message=Report%20Issue&colorA=1e1e2e&colorB=89dceb&logo=gitbook&logoColor=89dceb" alt="Report Issue">
+    </a>
+    <a href="https://docs.docker.com/engine/">
+      <img src="https://img.shields.io/badge/Architecture-Deep%20Dive-2496ED?style=for-the-badge&logo=docker&logoColor=white&colorA=1e1e2e" alt="Docker Architecture">
+    </a>
+    <a href="https://www.kernel.org/">
+      <img src="https://img.shields.io/badge/OS-Linux%20Native-FCC624?style=for-the-badge&logo=linux&logoColor=black&colorA=1e1e2e" alt="Linux Native">
+    </a>
+  </p>
+
 </div>
 
 ---
@@ -360,23 +372,28 @@ When you run `docker run -it ubuntu bash`, you are wiring these layers across is
 - `-t` (TTY / Teletype): Tells Docker to create a Pseudo-Terminal (PTY) connection. This ensures the container's Shell formats its text output correctly so your host's Terminal UI can render colors and prompts perfectly.
 
 ---
+
 ## 🌐 Day 6: Networking, Port Mapping, and Ephemeral Containers
 
 By default, a Docker container is a completely isolated environment. Today, I explored how to punch holes through that isolation to allow outside traffic in, and how to manage the lifecycle of background server processes.
 
 ### 1. The Network Namespace Problem (`-p`)
-If we run a Node.js server listening on port 8000 inside a container, we cannot access it by typing `localhost:8000` in our host machine's web browser. 
-*   **The Deep Why:** Because of Linux Network Namespaces, the container has its own private IP address and network stack. `localhost` inside the container is completely separate from `localhost` on our physical machine.
-*   **The Solution:** We use manual port mapping with the `-p` (lowercase) flag to bridge the two worlds.
+
+If we run a Node.js server listening on port 8000 inside a container, we cannot access it by typing `localhost:8000` in our host machine's web browser.
+
+- **The Deep Why:** Because of Linux Network Namespaces, the container has its own private IP address and network stack. `localhost` inside the container is completely separate from `localhost` on our physical machine.
+- **The Solution:** We use manual port mapping with the `-p` (lowercase) flag to bridge the two worlds.
 
 ```bash
 # Syntax: -p <HOST_PORT>:<CONTAINER_PORT>
 docker run -it -p 3000:8000 alpine-node-base:latest
 ```
-This tells the Docker Engine: *"Listen on port 3000 on my host machine. If any traffic arrives there, instantly teleport it to port 8000 inside this specific container."* 
-*(We can also chain multiple ports: `-p 8000:8000 -p 2000:4000 -p 2001:5000`)*.
+
+This tells the Docker Engine: _"Listen on port 3000 on my host machine. If any traffic arrives there, instantly teleport it to port 8000 inside this specific container."_
+_(We can also chain multiple ports: `-p 8000:8000 -p 2000:4000 -p 2001:5000`)_.
 
 ### 2. The `EXPOSE` Keyword (The Documentation Myth)
+
 We updated our `Dockerfile` to include the `EXPOSE` keyword:
 
 ```dockerfile
@@ -387,28 +404,125 @@ COPY index.js .
 EXPOSE 8000
 CMD["npm", "start"]
 ```
-*   **The Truth About `EXPOSE`:** Writing `EXPOSE 8000` does absolutely *nothing* to the host network. It does not magically open ports or breach security. 
-*   **Why use it?** It is simply a piece of JSON metadata embedded in the image. It serves as documentation so other developers don't have to read our source code to guess which port the app runs on.
+
+- **The Truth About `EXPOSE`:** Writing `EXPOSE 8000` does absolutely _nothing_ to the host network. It does not magically open ports or breach security.
+- **Why use it?** It is simply a piece of JSON metadata embedded in the image. It serves as documentation so other developers don't have to read our source code to guess which port the app runs on.
 
 ### 3. Automatic Port Mapping (`-P`)
-If we are deploying 100 containers, writing `-p` manually for each one will cause port collisions (we can't map two containers to host port 3000). 
-*   **The Solution:** We use the `-P` (capital P) flag combined with the `EXPOSE` keyword.
+
+If we are deploying 100 containers, writing `-p` manually for each one will cause port collisions (we can't map two containers to host port 3000).
+
+- **The Solution:** We use the `-P` (capital P) flag combined with the `EXPOSE` keyword.
 
 ```bash
 docker run -it -P alpine-node-base:latest
 ```
-*   **How it works:** When Docker sees `-P`, it reads the image metadata, finds `EXPOSE 8000`, and automatically assigns a random, high-numbered ephemeral port from our host machine (e.g., `32768`) and maps it to the container's `8000`. We can view the dynamically assigned port by running `docker ps`.
-*(Note: We can also expose ranges in the Dockerfile, such as `EXPOSE 8000-8009`).*
+
+- **How it works:** When Docker sees `-P`, it reads the image metadata, finds `EXPOSE 8000`, and automatically assigns a random, high-numbered ephemeral port from our host machine (e.g., `32768`) and maps it to the container's `8000`. We can view the dynamically assigned port by running `docker ps`.
+  _(Note: We can also expose ranges in the Dockerfile, such as `EXPOSE 8000-8009`)._
 
 ### 4. Ephemeral Containers (`--rm` and `-d`)
+
 When developing server applications, our terminals can quickly become cluttered, and our hard drives can fill up with stopped "dead" containers. We solve this by combining specific lifecycle flags:
 
 ```bash
 docker run -itd -P --rm alpine-node-base:latest
 ```
-*   **`-d` (Detached Mode):** Instead of the server logs hijacking our terminal, the container runs invisibly in the background as a daemon. We immediately get our terminal prompt back to do other work.
-*   **`--rm` (Auto-Cleanup):** Normally, when a container stops, its metadata and writable layer stay on the hard drive forever until we run `docker rm`. The `--rm` flag tells Docker: *"This container is ephemeral (temporary). The exact second it stops, automatically delete all traces of it from the system."*
 
+- **`-d` (Detached Mode):** Instead of the server logs hijacking our terminal, the container runs invisibly in the background as a daemon. We immediately get our terminal prompt back to do other work.
+- **`--rm` (Auto-Cleanup):** Normally, when a container stops, its metadata and writable layer stay on the hard drive forever until we run `docker rm`. The `--rm` flag tells Docker: _"This container is ephemeral (temporary). The exact second it stops, automatically delete all traces of it from the system."_
+
+---
+
+## 🚀 Day 7: Container Registries and Multi-Stage Builds
+
+Up until now, our images have lived entirely on our local hard drive. Today, I explored how to share our images with the world and how to drastically reduce their size for production deployment using Multi-Stage Builds.
+
+### 1. Docker Hub: The GitHub of Containers
+
+Just as we push source code to GitHub, we push Docker images to a **Container Registry**. The default public registry is Docker Hub.
+
+To avoid naming collisions across millions of developers, images are strictly namespaced using the format `username/repository:tag`.
+
+**The Publishing Workflow:**
+
+1.  **Authenticate:** We link our CLI to our registry account via `docker login`.
+2.  **Tag the Image:** We can tag an image during the build process, or tag an existing local image:
+
+    ```bash
+    # Method A: Build and tag directly
+    docker build -t itxprash/node-app:latest .
+
+    # Method B: Tag an existing local image with a specific version
+    docker tag my-local-node:latest itxprash/node-app:v1.1
+    ```
+
+3.  **Push to Registry:** We upload the frozen image layers to the cloud:
+    `bash
+    docker push itxprash/node-app:v1.1
+    `
+    Once pushed, anyone in the world can run `docker run -it -P itxprash/node-app:v1.1`, and their Docker Engine will automatically download the image and spin up the container.
+
+### 2. The "Build Locally" Trap
+
+When deploying applications (like a TypeScript or Rust app), we need to compile the source code into a binary or a `/dist` folder.
+
+- _The Amateur Question:_ "Why can't we just run `npm run build` on our host machine, and then use `COPY dist/ /app/dist` in the Dockerfile?"
+- _The Deep Why:_ If Developer A is on an M3 Mac (ARM architecture) and Developer B is on Windows (x86), building locally creates inconsistent, machine-specific artifacts. By moving the build process _inside_ the Dockerfile, we guarantee the code is always compiled in the exact same pristine Linux environment, regardless of whose laptop triggered the build.
+
+### 3. Multi-Stage Builds (The Production Standard)
+
+Building inside the container creates a new problem: **Image Bloat**.
+If we build a TypeScript or Rust app inside Docker, our final image is polluted with the source code, development dependencies (`node_modules`), and heavy compilers. This makes the image massive and increases the security attack surface.
+
+**The Solution:** We use Multi-Stage Builds to separate the "Building" environment from the "Running" environment.
+
+#### The Implementation
+
+```dockerfile
+FROM node:24-alpine3.23 as base
+
+# ==========================================
+# Stage 1: The Builder (Heavy, Dev Environment)
+# ==========================================
+FROM base as builder
+WORKDIR /home/build
+
+# Install ALL dependencies (including dev tools like TypeScript)
+COPY package*.json .
+COPY tsconfig.json .
+RUN npm install
+
+# Copy source code and compile the artifact
+COPY src/ src/
+RUN npm run build
+
+# ==========================================
+# Stage 2: The Runner (Lightweight, Prod Environment)
+# ==========================================
+FROM base as runner
+WORKDIR /home/app
+
+# Magic Step: Copy ONLY the compiled artifacts from Stage 1
+COPY --from=builder /home/build/dist dist/
+COPY --from=builder /home/build/package*.json .
+
+# Install ONLY production dependencies
+RUN npm install --omit=dev
+
+CMD["npm", "start"]
+```
+
+#### The Internal Mechanics (How the Magic Works)
+
+This is exactly what happens under the hood during a multi-stage build:
+
+1.  **Stage 1 (`builder`)** creates a temporary container. It holds our source code, compilers, and all development dependencies. It does the heavy lifting to generate the `/dist` folder.
+2.  **Stage 2 (`runner`)** spawns a **brand new, completely fresh container**.
+3.  The `COPY --from=builder` command reaches back into the Stage 1 container and extracts _only_ the compiled `/dist` folder.
+4.  **The Discard:** Docker completely throws away Stage 1. The source code, the TypeScript compiler, and the intermediate layers are instantly deleted. They never make it into the final exported image.
+
+This pattern is especially powerful in compiled languages like Rust or Go. Stage 1 downloads gigabytes of compilers and source code to build a single executable file. Stage 2 is an empty image that _only_ contains that final 10MB executable. The result is a lightning-fast, highly secure production image!
 
 ---
 
