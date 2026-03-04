@@ -459,8 +459,8 @@ To avoid naming collisions across millions of developers, images are strictly na
 
 3.  **Push to Registry:** We upload the frozen image layers to the cloud:
     `bash
-    docker push itxprash/node-app:v1.1
-    `
+docker push itxprash/node-app:v1.1
+`
     Once pushed, anyone in the world can run `docker run -it -P itxprash/node-app:v1.1`, and their Docker Engine will automatically download the image and spin up the container.
 
 ### 2. The "Build Locally" Trap
@@ -523,6 +523,202 @@ This is exactly what happens under the hood during a multi-stage build:
 4.  **The Discard:** Docker completely throws away Stage 1. The source code, the TypeScript compiler, and the intermediate layers are instantly deleted. They never make it into the final exported image.
 
 This pattern is especially powerful in compiled languages like Rust or Go. Stage 1 downloads gigabytes of compilers and source code to build a single executable file. Stage 2 is an empty image that _only_ contains that final 10MB executable. The result is a lightning-fast, highly secure production image!
+
+---
+
+## 🔐 Day 8: Secure User Management and Environment Variables
+
+Multi-stage builds gave us a lean image, but there is still a critical gap: **who is running our application inside the container?** Today covers hardening the runtime with proper user management and flexible environment variable configuration.
+
+### 1. The Root Problem — Why Running as Root Is Dangerous
+
+By default, every process inside a Docker container runs as the **`root` user** (UID 0). This is one of the most dangerous misconceptions in container security — isolation does not make root safe.
+
+- **Container Escape / Breakout:** If a dependency has a Remote Code Execution vulnerability, an attacker gains root inside the container. Combined with a kernel exploit, they can break out of the namespace and own the **host machine**.
+- **Principle of Least Privilege:** A process should only have the permissions it needs. A web server has zero reason to install packages, modify system files, or manage other processes.
+- **Mounted Volume Risk:** A root process inside a container has the same write permissions on `-v` mounted host directories as root on the host itself — a bug could silently delete real data.
+- **Compliance:** CIS Docker Benchmark and most production security audits explicitly require non-root container processes.
+
+> **The golden rule: Never run the final application as root. Always drop to a non-privileged user before the CMD instruction.**
+
+---
+
+### 2. Linux Users and Groups — A Quick Primer
+
+Every Linux process is owned by a **user** (UID) belonging to one or more **groups** (GID). File permissions are enforced based on these IDs.
+
+| Type          | UID Range | Purpose                                                                       |
+| :------------ | :-------- | :---------------------------------------------------------------------------- |
+| Root          | 0         | Superuser — bypasses almost all permission checks                             |
+| System Users  | 1–999     | Service accounts — no login shell, no home directory, no privilege escalation |
+| Regular Users | 1000+     | Human login accounts (what you use on your laptop)                            |
+
+We want a **system user** — the same pattern every production Linux service uses (`nginx` runs as `www-data`, `postgres` runs as `postgres`, etc.).
+
+---
+
+### 3. Creating a System User in Alpine Linux
+
+Alpine Linux uses a minimal set of tools (`busybox` applets) instead of the full GNU `shadow-utils` package. The commands are slightly different from Debian/Ubuntu:
+
+```dockerfile
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nodejs
+```
+
+Let us break down every flag:
+
+**`addgroup --system --gid 1001 nodejs`**
+
+| Flag         | Meaning                                                                                                                                                                                                                                                       |
+| :----------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--system`   | Creates a **system group** (GID in the reserved 1–999 range by convention, but we are pinning it explicitly). This group has no special login capabilities.                                                                                                   |
+| `--gid 1001` | Pin the Group ID to `1001`. Pinning IDs is a best practice because it makes the container's permission model deterministic and reproducible across every build on every machine. Without this, IDs are assigned sequentially and could differ between builds. |
+| `nodejs`     | The name of the group.                                                                                                                                                                                                                                        |
+
+**`adduser --system --uid 1001 nodejs`**
+
+| Flag         | Meaning                                                                                                                                                                                              |
+| :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--system`   | Creates a **system user**. This automatically disables the login shell (sets it to `/sbin/nologin` or `/bin/false`) and prevents interactive login. The user exists solely to own and run processes. |
+| `--uid 1001` | Pins the User ID to `1001`. Same determinism argument as above.                                                                                                                                      |
+| `nodejs`     | The username. Alpine's `adduser` automatically adds the user to the group of the same name (`nodejs`) that we just created.                                                                          |
+
+The result: a user `nodejs` (UID `1001`) in group `nodejs` (GID `1001`), with no shell, no password, and no home directory — a locked-down service account.
+
+---
+
+### 4. The `USER` Instruction
+
+After creating the non-root user, we hand ownership of all subsequent instructions over to it using the `USER` directive:
+
+```dockerfile
+USER nodejs
+```
+
+Everything _after_ this line — including `CMD` — runs as `nodejs` instead of `root`. The server process has UID `1001`, cannot write to root-owned files, and even if fully compromised, an attacker is trapped in an unprivileged account with no shell and no escalation path.
+
+> **Note on placement:** The `USER` instruction goes _after_ all `COPY` and `npm install` steps, because those operations need write access. Drop privileges at the last moment, just before `CMD`.
+
+---
+
+### 5. Environment Variables — Flexible Runtime Configuration
+
+#### `ENV` in the Dockerfile
+
+```dockerfile
+EXPOSE 8000
+ENV PORT=8000
+```
+
+The `ENV` instruction bakes a **default environment variable** into the image metadata. When a container starts, the Node.js process can read this via `process.env.PORT`.
+
+Looking at [src/index.ts](ts-app/src/index.ts):
+
+```typescript
+const PORT = process.env.PORT ? +process.env.PORT : 8000;
+```
+
+This line reads from `process.env.PORT`. If the variable exists, it uses it (converting it to a number with `+`). If it does not exist, it falls back to `8000`. With `ENV PORT=8000` set in the Dockerfile, there is always a sensible default baked in — no hardcoded magic numbers buried in application code.
+
+#### Overriding at Runtime with `-e`
+
+The `ENV` default can be overridden at container startup using the `-e` flag, without rebuilding the image:
+
+```bash
+# The container process will see PORT=3000
+docker run -it -p 3000:3000 -e PORT=3000 ts-app
+```
+
+Here, the `-p 3000:3000` tells Docker to map host port 3000 to container port 3000, and `-e PORT=3000` tells the Node.js process inside to listen on port 3000. Both must match — the port the app listens on (controlled by `PORT`) and the port Docker is forwarding traffic to (`-p <host>:<container>`).
+
+#### Loading a Whole `.env` File with `--env-file`
+
+For real applications with many variables (database URLs, API keys, secrets), passing each one with `-e` becomes impractical. Docker supports loading an entire file:
+
+```bash
+docker run -it -p 3000:3000 --env-file=./.env ts-app
+```
+
+Docker reads the `.env` file line by line and injects every `KEY=VALUE` pair as an environment variable into the container before the process starts. The application code sees them exactly as if you had passed them individually with `-e`.
+
+> **Security note:** Never `COPY` a `.env` file containing secrets into the Docker image itself. Baking secrets into image layers is a critical security mistake — the file becomes part of the image and can be extracted by anyone who has access to it. Use `--env-file` at runtime, or a secrets manager (like Docker Secrets or HashiCorp Vault) in production.
+
+---
+
+### 6. The Production-Ready Dockerfile
+
+Combining everything from the last two days — multi-stage builds, non-root users, and environment configuration — gives us the final hardened Dockerfile:
+
+```dockerfile
+FROM node:24-alpine3.23 as base
+
+# ==========================================
+# Stage 1: The Builder (Heavy, Dev Environment)
+# ==========================================
+FROM base as builder
+
+WORKDIR /home/build
+
+COPY package*.json .
+COPY tsconfig.json .
+
+RUN npm install
+COPY src/ src/
+RUN npm run build
+
+
+# ==========================================
+# Stage 2: The Runner (Lightweight, Secure, Prod Environment)
+# ==========================================
+FROM base as runner
+
+WORKDIR /home/app
+
+# Copy only the compiled artifacts from Stage 1
+COPY --from=builder /home/build/dist dist/
+COPY --from=builder /home/build/package*.json .
+
+# Install only production dependencies
+RUN npm install --omit=dev
+
+# Create a non-root system group and user
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nodejs
+
+# Drop to the non-root user before starting the process
+USER nodejs
+
+# Document the default port the app listens on
+EXPOSE 8000
+# Set a default PORT environment variable (overridable at runtime)
+ENV PORT=8000
+
+CMD ["npm", "start"]
+```
+
+#### Running the Container
+
+```bash
+# Standard: map host 8000 → container 8000 (uses ENV default)
+docker run -it -p 8000:8000 ts-app
+
+# Override: tell the app to listen on 3000 and map it accordingly
+docker run -it -p 3000:3000 -e PORT=3000 ts-app
+
+# Using a .env file for multiple variables
+docker run -it -p 3000:3000 --env-file=./.env ts-app
+```
+
+#### The Security Layers at a Glance
+
+| Layer                  | Mechanism              | What It Prevents                                         |
+| :--------------------- | :--------------------- | :------------------------------------------------------- |
+| Multi-stage build      | Stage 1 discarded      | Source code & dev deps never reach production            |
+| `--omit=dev`           | npm flag               | Development tools excluded from final image              |
+| System user (UID 1001) | `adduser --system`     | Process has no shell, no login, minimal permissions      |
+| `USER nodejs`          | Dockerfile instruction | All runtime processes drop root privileges               |
+| `ENV PORT`             | Dockerfile + `-e` flag | No hardcoded config; flexible and overridable at runtime |
 
 ---
 
