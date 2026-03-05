@@ -528,127 +528,84 @@ This pattern is especially powerful in compiled languages like Rust or Go. Stage
 
 ## 🔐 Day 8: Secure User Management and Environment Variables
 
-Multi-stage builds gave us a lean image, but there is still a critical gap: **who is running our application inside the container?** Today covers hardening the runtime with proper user management and flexible environment variable configuration.
+Multi-stage builds give us a lean image, but there is still a critical gap: **who is running our application inside the container?** Today, the main focus was on hardening the runtime with proper user management and making configurations dynamic via environment variables.
 
 ### 1. The Root Problem — Why Running as Root Is Dangerous
 
-By default, every process inside a Docker container runs as the **`root` user** (UID 0). This is one of the most dangerous misconceptions in container security — isolation does not make root safe.
+By default, processes inside a Docker container run as the **`root` user** (UID 0). Isolation does not make root safe.
 
-- **Container Escape / Breakout:** If a dependency has a Remote Code Execution vulnerability, an attacker gains root inside the container. Combined with a kernel exploit, they can break out of the namespace and own the **host machine**.
-- **Principle of Least Privilege:** A process should only have the permissions it needs. A web server has zero reason to install packages, modify system files, or manage other processes.
-- **Mounted Volume Risk:** A root process inside a container has the same write permissions on `-v` mounted host directories as root on the host itself — a bug could silently delete real data.
-- **Compliance:** CIS Docker Benchmark and most production security audits explicitly require non-root container processes.
+- **Container Breakout:** If an attacker exploits a Remote Code Execution vulnerability in our app, they gain root access inside the container. Combined with a kernel exploit, they could break out and take over the **host machine**.
+- **Principle of Least Privilege:** A web server has no legitimate reason to install packages or modify system files.
+- **Mounted Volume Risk:** A root process inside a container has root-level write permissions on `-v` mounted host directories.
+- **Compliance:** Production security audits (like CIS Docker Benchmarks) explicitly forbid running container processes as root.
 
-> **The golden rule: Never run the final application as root. Always drop to a non-privileged user before the CMD instruction.**
-
----
-
-### 2. Linux Users and Groups — A Quick Primer
-
-Every Linux process is owned by a **user** (UID) belonging to one or more **groups** (GID). File permissions are enforced based on these IDs.
-
-| Type          | UID Range | Purpose                                                                       |
-| :------------ | :-------- | :---------------------------------------------------------------------------- |
-| Root          | 0         | Superuser — bypasses almost all permission checks                             |
-| System Users  | 1–999     | Service accounts — no login shell, no home directory, no privilege escalation |
-| Regular Users | 1000+     | Human login accounts (what you use on your laptop)                            |
-
-We want a **system user** — the same pattern every production Linux service uses (`nginx` runs as `www-data`, `postgres` runs as `postgres`, etc.).
+> **The Golden Rule: We must never run the final application as root. Always drop to a non-privileged user before the `CMD` instruction.**
 
 ---
 
-### 3. Creating a System User in Alpine Linux
+### 2. Creating a Locked-Down System User
 
-Alpine Linux uses a minimal set of tools (`busybox` applets) instead of the full GNU `shadow-utils` package. The commands are slightly different from Debian/Ubuntu:
+Every Linux process is owned by a User (UID) and a Group (GID). To secure our container, we need to create a **System User** — a digital "ghost" account designed purely to run background services, with no password, no home directory, and no ability to open a terminal shell.
+
+In Alpine Linux, we do this using `busybox` applets:
 
 ```dockerfile
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nodejs
 ```
 
-Let us break down every flag:
+**The Deep Why: Naming and Numbering**
 
-**`addgroup --system --gid 1001 nodejs`**
-
-| Flag         | Meaning                                                                                                                                                                                                                                                       |
-| :----------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--system`   | Creates a **system group** (GID in the reserved 1–999 range by convention, but we are pinning it explicitly). This group has no special login capabilities.                                                                                                   |
-| `--gid 1001` | Pin the Group ID to `1001`. Pinning IDs is a best practice because it makes the container's permission model deterministic and reproducible across every build on every machine. Without this, IDs are assigned sequentially and could differ between builds. |
-| `nodejs`     | The name of the group.                                                                                                                                                                                                                                        |
-
-**`adduser --system --uid 1001 nodejs`**
-
-| Flag         | Meaning                                                                                                                                                                                              |
-| :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--system`   | Creates a **system user**. This automatically disables the login shell (sets it to `/sbin/nologin` or `/bin/false`) and prevents interactive login. The user exists solely to own and run processes. |
-| `--uid 1001` | Pins the User ID to `1001`. Same determinism argument as above.                                                                                                                                      |
-| `nodejs`     | The username. Alpine's `adduser` automatically adds the user to the group of the same name (`nodejs`) that we just created.                                                                          |
-
-The result: a user `nodejs` (UID `1001`) in group `nodejs` (GID `1001`), with no shell, no password, and no home directory — a locked-down service account.
+- **Why name the user and group the same (`nodejs`)?** This is a Linux security standard called **User Private Groups (UPG)**. Giving the service its own dedicated group ensures strict isolation and prevents accidental permission sharing with other services.
+- **Why use ID `1001` instead of `1-999`?** Typically, system accounts use IDs 1-999. However, the official Node.js Docker image already ships with a default human user named `node` at UID `1000`. By explicitly pinning our custom user to `1001`, we mathematically guarantee no collisions. The `--system` flag still does the heavy lifting of stripping away the login shell and password.
 
 ---
 
-### 4. The `USER` Instruction
+### 3. The `USER` Instruction
 
-After creating the non-root user, we hand ownership of all subsequent instructions over to it using the `USER` directive:
+After creating our locked-down user, we hand over ownership using the `USER` directive:
 
 ```dockerfile
 USER nodejs
 ```
 
-Everything _after_ this line — including `CMD` — runs as `nodejs` instead of `root`. The server process has UID `1001`, cannot write to root-owned files, and even if fully compromised, an attacker is trapped in an unprivileged account with no shell and no escalation path.
-
-> **Note on placement:** The `USER` instruction goes _after_ all `COPY` and `npm install` steps, because those operations need write access. Drop privileges at the last moment, just before `CMD`.
+Everything _after_ this line (including the final `CMD`) runs as `nodejs` instead of `root`.
+_(Note: We place this instruction at the very end of our Dockerfile, immediately after `npm install` and file copying, as those setup steps still require root privileges to execute)._
 
 ---
 
-### 5. Environment Variables — Flexible Runtime Configuration
+### 4. Environment Variables — Dynamic Configuration
 
-#### `ENV` in the Dockerfile
+We should never hardcode configurations (like ports, database URLs, or API keys) into our images. Instead, we use environment variables.
+
+#### Setting Defaults (`ENV`)
 
 ```dockerfile
 EXPOSE 8000
 ENV PORT=8000
 ```
 
-The `ENV` instruction bakes a **default environment variable** into the image metadata. When a container starts, the Node.js process can read this via `process.env.PORT`.
+While `EXPOSE` is just documentation, `ENV PORT=8000` actually injects a default variable into the container. Our Node.js app can securely read this via `process.env.PORT`.
 
-Looking at [src/index.ts](ts-app/src/index.ts):
+#### Overriding at Runtime (`-e` & `--env-file`)
 
-```typescript
-const PORT = process.env.PORT ? +process.env.PORT : 8000;
-```
-
-This line reads from `process.env.PORT`. If the variable exists, it uses it (converting it to a number with `+`). If it does not exist, it falls back to `8000`. With `ENV PORT=8000` set in the Dockerfile, there is always a sensible default baked in — no hardcoded magic numbers buried in application code.
-
-#### Overriding at Runtime with `-e`
-
-The `ENV` default can be overridden at container startup using the `-e` flag, without rebuilding the image:
+We can instantly change our app's configuration without rebuilding the image:
 
 ```bash
-# The container process will see PORT=3000
+# Override a single variable (tells the app to listen on 3000)
 docker run -it -p 3000:3000 -e PORT=3000 ts-app
-```
 
-Here, the `-p 3000:3000` tells Docker to map host port 3000 to container port 3000, and `-e PORT=3000` tells the Node.js process inside to listen on port 3000. Both must match — the port the app listens on (controlled by `PORT`) and the port Docker is forwarding traffic to (`-p <host>:<container>`).
-
-#### Loading a Whole `.env` File with `--env-file`
-
-For real applications with many variables (database URLs, API keys, secrets), passing each one with `-e` becomes impractical. Docker supports loading an entire file:
-
-```bash
+# Load bulk secrets from a local file
 docker run -it -p 3000:3000 --env-file=./.env ts-app
 ```
 
-Docker reads the `.env` file line by line and injects every `KEY=VALUE` pair as an environment variable into the container before the process starts. The application code sees them exactly as if you had passed them individually with `-e`.
-
-> **Security note:** Never `COPY` a `.env` file containing secrets into the Docker image itself. Baking secrets into image layers is a critical security mistake — the file becomes part of the image and can be extracted by anyone who has access to it. Use `--env-file` at runtime, or a secrets manager (like Docker Secrets or HashiCorp Vault) in production.
+> **Security Note:** We must never `COPY` a `.env` file containing production secrets directly into the Docker image. Doing so permanently bakes the secrets into a read-only layer that anyone can extract. We always inject secrets at runtime.
 
 ---
 
-### 6. The Production-Ready Dockerfile
+### 5. The Production-Ready Dockerfile
 
-Combining everything from the last two days — multi-stage builds, non-root users, and environment configuration — gives us the final hardened Dockerfile:
+Combining multi-stage builds, non-root users, and dynamic environments gives us a hardened, production-ready recipe:
 
 ```dockerfile
 FROM node:24-alpine3.23 as base
@@ -657,68 +614,125 @@ FROM node:24-alpine3.23 as base
 # Stage 1: The Builder (Heavy, Dev Environment)
 # ==========================================
 FROM base as builder
-
 WORKDIR /home/build
 
 COPY package*.json .
 COPY tsconfig.json .
-
 RUN npm install
+
 COPY src/ src/
 RUN npm run build
 
-
 # ==========================================
-# Stage 2: The Runner (Lightweight, Secure, Prod Environment)
+# Stage 2: The Runner (Lightweight, Secure Environment)
 # ==========================================
 FROM base as runner
-
 WORKDIR /home/app
 
-# Copy only the compiled artifacts from Stage 1
+# Extract ONLY the compiled artifacts
 COPY --from=builder /home/build/dist dist/
 COPY --from=builder /home/build/package*.json .
 
-# Install only production dependencies
+# Install ONLY production dependencies
 RUN npm install --omit=dev
 
-# Create a non-root system group and user
+# Create the locked-down system user/group
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nodejs
 
-# Drop to the non-root user before starting the process
+# Drop root privileges
 USER nodejs
 
-# Document the default port the app listens on
 EXPOSE 8000
-# Set a default PORT environment variable (overridable at runtime)
 ENV PORT=8000
 
 CMD ["npm", "start"]
 ```
 
-#### Running the Container
-
-```bash
-# Standard: map host 8000 → container 8000 (uses ENV default)
-docker run -it -p 8000:8000 ts-app
-
-# Override: tell the app to listen on 3000 and map it accordingly
-docker run -it -p 3000:3000 -e PORT=3000 ts-app
-
-# Using a .env file for multiple variables
-docker run -it -p 3000:3000 --env-file=./.env ts-app
-```
-
 #### The Security Layers at a Glance
 
-| Layer                  | Mechanism              | What It Prevents                                         |
-| :--------------------- | :--------------------- | :------------------------------------------------------- |
-| Multi-stage build      | Stage 1 discarded      | Source code & dev deps never reach production            |
-| `--omit=dev`           | npm flag               | Development tools excluded from final image              |
-| System user (UID 1001) | `adduser --system`     | Process has no shell, no login, minimal permissions      |
-| `USER nodejs`          | Dockerfile instruction | All runtime processes drop root privileges               |
-| `ENV PORT`             | Dockerfile + `-e` flag | No hardcoded config; flexible and overridable at runtime |
+| Mechanism              | What It Prevents                                                          |
+| :--------------------- | :------------------------------------------------------------------------ |
+| **Stage 1 Discarded**  | Source code and development dependencies never reach production.          |
+| **`--omit=dev`**       | Heavy compilation tools are excluded from the final image.                |
+| **`adduser --system`** | The executing process has no shell, no password, and minimal permissions. |
+| **`USER nodejs`**      | Drops root privileges, preventing catastrophic container breakouts.       |
+| **`--env-file`**       | Keeps hardcoded secrets out of our source code and image layers.          |
+
+---
+
+## 🌐 Day 9: Docker Networking, The Default Bridge, and NAT
+
+Today, the black box of Docker Networking was opened. When we spin up an isolated container, how does it instantly have an IP address, a MAC address, and access to the public internet? We explored the mechanics of the "Default Bridge" and the underlying Linux routing tables.
+
+### 1. The Anatomy of the Default Bridge (`docker0`)
+
+When we install Docker on a Linux host, it automatically creates a virtual network interface called `docker0`. This acts as a virtual Network Switch.
+
+Unless we explicitly specify otherwise, every new container connects to this default switch. But how does the physical connection work?
+
+- **The Virtual Cable (`veth` pair):** Docker creates a Virtual Ethernet Pair. Think of it as an invisible Ethernet cable. End A plugs into the container's isolated network card (`eth0`), and End B plugs into the host's `docker0` switch.
+- **IP Allocation:** The Docker Daemon acts as a mini DHCP server, automatically assigning a private IP (e.g., `172.17.0.2/16`) to the container.
+- **The MAC Address Trick:** To prevent network collisions, Docker dynamically generates the container's MAC address directly from its assigned IP address. (For example, an IP of `172.17.0.2` becomes a MAC address of `02:42:ac:11:00:02`).
+
+### 2. Internal Routing (Container-to-Container)
+
+We spun up two background `busybox` containers and inspected the network using `docker network inspect bridge`. We found their internal IPs:
+
+- `my-container` -> `172.17.0.2`
+- `my-container-2` -> `172.17.0.3`
+
+When we executed a ping from the first container:
+
+```bash
+docker exec my-container ping 172.17.0.3
+```
+
+The ping succeeded perfectly. Because both containers are plugged into the exact same `docker0` virtual switch, they have unrestricted, private access to each other.
+
+**The Catch:** When we tried `ping my-container-2`, it failed with `bad address`. The default bridge network **does not support automatic DNS resolution**. We are forced to use raw IP addresses to communicate.
+
+### 3. External Routing and NAT (Container-to-Internet)
+
+When we run `docker exec my-container ping google.com`, the container successfully reaches the internet. How does a fake, private IP address (`172.17.0.2`) talk to Google?
+
+- **The Default Gateway:** The container doesn't know where Google is, so it sends the packet to the `docker0` bridge (the Gateway).
+- **NAT (Network Address Translation):** Private IPs (`172.17.x.x`) are non-routable on the public internet. Before the packet leaves our host machine's physical Wi-Fi card, the Linux Kernel uses `iptables` to erase the container's private IP and replace it with our host router's real public IP. When Google replies, the Linux Kernel remembers the swap and forwards the packet back into the container.
+
+> **⚠️ Security Realization: Isolation is NOT Anonymity**
+> Because Docker uses NAT, any traffic leaving the container uses our host machine's real public IP address. Docker isolates the _filesystem and CPU_, but it does not hide our network identity. To achieve true network anonymity, we would have to route the container's traffic through a secondary VPN container.
+
+### 4. The Microservices Architecture Use-Case
+
+Why do we need this internal bridge network? In a modern Microservices architecture, we might have a Node.js API, a Redis cache, and a PostgreSQL database.
+
+- We use port mapping (`-p 8000:8000`) **only** for the Node.js container so the public internet can access our API.
+- We **do not** expose ports for Redis or PostgreSQL. They remain completely hidden from the outside world, communicating securely with the Node.js container using the private internal bridge network.
+
+### 5. The Limitations of the Default Bridge (Looking Ahead)
+
+The fact that `ping my-container-2` failed exposed a massive flaw in the default bridge: it lacks DNS resolution. Hardcoding IP addresses like `172.17.0.3` in our application code is dangerous because container IPs change every time they restart.
+
+To solve this, Docker provides **User-Defined Bridge Networks**. These custom networks are far superior to the default bridge because they provide:
+
+1.  **Automatic DNS Resolution:** We can ping and connect to containers using their names instead of IPs.
+2.  **Better Isolation:** We can group specific containers together securely.
+3.  **On-the-Fly Management:** We can attach and detach running containers without restarting them.
+
+---
+
+### 💡 Did You Know?
+
+**Detaching vs. Stopping (`-d` vs `--rm`)**
+
+When we run: `docker run -itd --rm --name=test busybox`, we might expect the `--rm` flag to delete the container the moment we return to our host terminal. However, running `docker ps` shows the container is still running. Why?
+
+Developers often confuse **Detaching** with **Stopping**.
+
+- **`-d` (Detached):** This tells Docker to shove the process into the background and give us our terminal back. _It does not stop the process._ Because we used `-it`, the `busybox` shell is still open in the background, patiently waiting for input.
+- **`--rm` (Auto-Cleanup):** This flag acts as a grim reaper that only triggers on one specific event: **when PID 1 actually dies**.
+
+Because `-d` only hid the terminal, PID 1 is still alive. The container will only be deleted when we explicitly kill it via `docker stop test` or by attaching to it and typing `exit`.
 
 ---
 
