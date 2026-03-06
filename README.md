@@ -736,6 +736,167 @@ Because `-d` only hid the terminal, PID 1 is still alive. The container will onl
 
 ---
 
+## 🌉 Day 10: User-Defined Bridges and Network Drivers
+
+Today, we moved beyond the limitations of Docker's default network. We explored how to create custom, isolated network topologies, how automatic DNS works, and how to utilize alternative network drivers for specialized performance and security needs. To prove these concepts, we built a hands-on network lab.
+
+### 1. Creating a User-Defined Bridge Network
+
+The default `bridge` (`docker0`) is great for quick tests, but it lacks a critical feature for production microservices: **DNS Resolution**. Hardcoding IP addresses is dangerous because container IPs change dynamically upon restart.
+
+To solve this, we created our own **User-Defined Bridge Network** named `andromeda`:
+
+```bash
+docker network create andromeda
+```
+
+Running `docker network ls` confirms our new custom bridge is active alongside the defaults:
+
+```text
+NETWORK ID     NAME        DRIVER    SCOPE
+dbddbec39cf7   andromeda   bridge    local
+b3efe4b96ea4   bridge      bridge    local
+86f9a884f4b3   host        host      local
+29574a26f1a7   none        null      local
+```
+
+### 2. Spinning Up the Lab (The Setup)
+
+Next, we spun up three containers (`milkyway`, `milkyway2`, `milkyway3`) and explicitly attached them to our new `andromeda` network using `--network andromeda`:
+
+```bash
+docker run -itd --network andromeda --rm --name=milkyway busybox
+docker run -itd --network andromeda --rm --name=milkyway2 busybox
+docker run -itd --network andromeda --rm --name=milkyway3 nginx
+```
+
+To test network isolation, we spun up a fourth container (`my-container`), but let it fall back to the **default bridge**:
+
+```bash
+docker run -itd --rm --name=my-container busybox
+```
+
+Our current system state (`docker ps`):
+
+```text
+CONTAINER ID   IMAGE     COMMAND                  CREATED          STATUS          PORTS     NAMES
+d34192c94470   busybox   "sh"                     17 seconds ago   Up 16 seconds             my-container
+b58c58291fd8   nginx     "/docker-entrypoint.…"   4 hours ago      Up 4 hours      80/tcp    milkyway3
+7e2c8eaca4f1   busybox   "sh"                     5 hours ago      Up 5 hours                milkyway2
+0365033f92f8   busybox   "sh"                     7 hours ago      Up 7 hours                milkyway
+```
+
+### 3. The Power of Automatic DNS Resolution
+
+If we inspect our custom network (`docker network inspect andromeda`), we can see Docker assigned internal IPs to our containers (e.g., `milkyway` is `172.18.0.2`, `milkyway2` is `172.18.0.3`).
+
+But because we are on a user-defined network, **we don't need to memorize these IPs.** We can ping the containers directly by their names:
+
+```bash
+⚡prash ❯❯ docker exec milkyway ping milkyway2
+PING milkyway2 (172.18.0.3): 56 data bytes
+64 bytes from 172.18.0.3: seq=0 ttl=64 time=0.056 ms
+64 bytes from 172.18.0.3: seq=1 ttl=64 time=0.061 ms
+
+⚡prash ❯❯ docker exec milkyway ping milkyway3
+PING milkyway3 (172.18.0.4): 56 data bytes
+64 bytes from 172.18.0.4: seq=0 ttl=64 time=0.044 ms
+```
+
+- **The Deep Why:** For user-defined networks, the Docker Daemon spins up an embedded DNS server at `127.0.0.11` inside the container's network namespace. When `milkyway` tries to ping `milkyway3`, this embedded DNS server catches the request, looks up `milkyway3` in its internal registry, and translates it to `172.18.0.4` instantly.
+
+### 4. Network Isolation Proof
+
+What happens if `milkyway` (on the `andromeda` network) tries to ping `my-container` (on the default `bridge` network)?
+
+```bash
+⚡prash ❯❯ docker exec milkyway ping my-container
+ping: bad address 'my-container'
+```
+
+Even if we inspect the default bridge, find `my-container`'s exact IP (`172.17.0.2`), and ping it directly, it fails:
+
+```bash
+⚡prash ❯❯ docker exec milkyway ping 172.17.0.2
+^C⏎
+```
+
+- **The Deep Why:** The Linux kernel's `iptables` explicitly drop packets attempting to cross different virtual switches. They are in completely isolated environments.
+
+### 5. On-the-Fly Connections and Disconnections
+
+Unlike the default bridge, user-defined networks allow us to dynamically patch cables between running containers without stopping them.
+
+**Connecting a running container:**
+
+```bash
+docker network connect andromeda my-container
+```
+
+Now, `my-container` is attached to _both_ the default bridge and `andromeda`. If we try the ping again:
+
+```bash
+⚡prash ❯❯ docker exec milkyway ping my-container
+PING my-container (172.18.0.5): 56 data bytes
+64 bytes from 172.18.0.5: seq=0 ttl=64 time=0.106 ms
+```
+
+It works instantly!
+
+**Disconnecting a running container:**
+
+```bash
+docker network disconnect andromeda milkyway3
+```
+
+If we try to ping `milkyway3` now, it immediately fails:
+
+```bash
+⚡prash ❯❯ docker exec milkyway ping milkyway3
+ping: bad address 'milkyway3'
+```
+
+### 6. The `docker inspect` Mystery: HostConfig vs. NetworkSettings
+
+After disconnecting `milkyway3` from `andromeda`, we ran `docker inspect milkyway3`. The output was confusing: it still showed `"NetworkMode": "andromeda"`! Did the disconnect fail?
+
+```json
+"HostConfig": {
+    "NetworkMode": "andromeda",
+    ...
+}
+```
+
+**No, the disconnect succeeded perfectly.** This exposes a deep architectural quirk of how Docker stores metadata:
+
+- **`HostConfig` (The History):** The `"NetworkMode": "andromeda"` we saw is located under the `HostConfig` JSON object. This object is a permanent, immutable record of the exact flags we typed when we originally ran `docker run`. It _never_ changes.
+- **`NetworkSettings` (The Live State):** To see the _actual_, current, live networking state of the container, we must look at the `NetworkSettings.Networks` object at the very bottom of the JSON. When we disconnected `milkyway3`, that object became empty (`{}`), proving the container was successfully unplugged!
+
+### 7. Other Docker Network Drivers
+
+While bridge networks (default and user-defined) cover 90% of use cases, Docker provides other network drivers for specialized scenarios:
+
+- **`host` (Performance Mode):**
+  Removes network isolation between the container and the Docker host. The container does not get its own IP address allocated. If we run a container on port 80 using host networking, it directly occupies port 80 on our physical machine's IP address. No `-p` port mapping is needed.
+- **`none` (The Lockdown Mode):**
+  Completely isolates a container from the host and other containers. It cannot reach the internet, and no one can reach it. Useful for highly secure, offline processing tasks.
+- **Advanced Drivers (`overlay`, `macvlan`, `ipvlan`):** Complex drivers for enterprise deployments. `overlay` connects containers across multiple physical servers (Docker Swarm), while `macvlan` assigns a real, physical MAC address to a container so legacy physical network routers can interact with it directly.
+
+---
+
+### 💡 Did You Know?
+
+**The POSIX CLI Standard: Space vs. Equals**
+
+When we connected our containers to our custom network, we used the syntax `--network andromeda`. However, we will often see other developers or tutorials use `--network=andromeda`. Is there a difference?
+
+**No, they are 100% identical.** This is not a Docker-specific feature; it is a fundamental rule of how modern Linux command-line tools (like Docker, Git, and Kubernetes) are engineered, governed by the **POSIX standard**.
+
+- **Long Flags (`--`):** Flags with two dashes (like `--network` or `--name`) accept both a space and an equals sign. Many engineers prefer the `=` format because it visually binds the key and the value together, making massive multi-line commands much easier to read and debug.
+- **Short Flags (`-`):** Single-letter flags (like `-p`, `-e`, or `-v`) _must_ use a space. If we try to use an equals sign (e.g., `-p=8000:8000`), the underlying C/Go CLI parser will instantly throw a syntax error!
+
+---
+
 <p align="center" dir="auto">
 	<a target="_blank" rel="noopener noreferrer" href="https://github.com/ITx-prash/docker-journey/blob/main/assets/coder.png"><img src="https://raw.githubusercontent.com/ITx-prash/floweave/main/assets/coder.png" height="150" alt="Coder illustration" style="max-width: 100%; height: auto; max-height: 150px;"></a>
 	<br>
