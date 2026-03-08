@@ -897,6 +897,57 @@ When we connected our containers to our custom network, we used the syntax `--ne
 
 ---
 
+## 💾 Day 11: Data Persistence and Bind Mounts
+
+Containers are ephemeral by design. When a container stops or is removed, any data written inside it is permanently destroyed. Today, we explored how to break this rule and make our container data persistent by bridging the container's file system with our physical host machine.
+
+### 1. The Ephemeral Storage Problem
+To prove that containers have amnesia, we spun up a temporary Ubuntu container:
+```bash
+docker run -it --rm ubuntu
+```
+Inside, we created a secret file:
+```bash
+cat > secret.txt
+I am a secret XD..
+^C
+```
+*(When we exited, the `--rm` flag deleted the container. The `secret.txt` file was completely wiped from existence because it was stored in the container's temporary Writable Layer).*
+
+> **📝 Quick Note: The Magic of `cat`**
+> How did we create that file without a text editor? The `>` and `>>` symbols are Linux redirect operators.
+> *   `cat > filename.txt`: Takes whatever we type in the terminal and **overwrites** (or creates) the file.
+> *   `cat >> filename.txt`: **Appends** our typed text to the very bottom of an existing file without deleting what is already there.
+
+### 2. What exactly is a "Volume"?
+In Docker, a "Volume" is a broad term for a storage mechanism that completely bypasses the container's temporary OverlayFS (Copy-on-Write) file system. Instead of writing data into the container's fragile top layer, a volume creates a direct wormhole to a safe, permanent folder sitting on the physical host machine's hard drive.
+
+### 3. The Solution: Bind Mounts (`-v`)
+If we have a folder on our host machine (e.g., `/home/prash/Desktop/docker-journey`), we can mount it directly inside the container. We use the `-v` (volume) flag, mapping the paths exactly like we map ports: `<absolute-host-path>:<absolute-container-path>`.
+
+```bash
+docker run -it -v /home/prash/Desktop/docker-journey:/home/ubuntu/my-docker ubuntu
+```
+
+#### The Real-Time Sync Experiment
+Once inside the container, we navigated to our mapped folder and created a file:
+```bash
+root@c51d15d98a4a:/home/ubuntu/my-docker# cat > temp.txt
+hello
+^C
+root@c51d15d98a4a:/home/ubuntu/my-docker# cat temp.txt 
+hello
+```
+**The Result:** The moment we pressed `Ctrl+C`, `temp.txt` instantly appeared on our host machine's desktop folder. It is a real-time, bi-directional sync. If we delete the container, `temp.txt` remains perfectly safe on our host machine.
+
+### 4. Engineering Use-Cases (The "Deep Why")
+Why is this simple mounting mechanism so powerful in DevOps?
+
+1.  **Cross-OS Tooling:** We might need to run a highly specific tool that *only* works on Linux (like certain C++ compilers or pentesting scripts). Even if our host is a Mac or Windows machine, we can mount our local code into a Linux container, let the Linux container process the files, and the finished results will magically output directly back to our Mac/Windows hard drive.
+2.  **Live Code Editing:** For web development, we can mount our source code into a Node.js container. When we edit `index.js` in VS Code on our host laptop, the container instantly sees the changes and restarts the server. No rebuilding images required!
+3.  **Shared State:** A single host folder can be mounted into *multiple* containers at the same time. Container A can write data to a file, and Container B can instantly read that exact same file.
+---
+
 <p align="center" dir="auto">
 	<a target="_blank" rel="noopener noreferrer" href="https://github.com/ITx-prash/docker-journey/blob/main/assets/coder.png"><img src="https://raw.githubusercontent.com/ITx-prash/floweave/main/assets/coder.png" height="150" alt="Coder illustration" style="max-width: 100%; height: auto; max-height: 150px;"></a>
 	<br>
