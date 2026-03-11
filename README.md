@@ -902,27 +902,35 @@ When we connected our containers to our custom network, we used the syntax `--ne
 Containers are ephemeral by design. When a container stops or is removed, any data written inside it is permanently destroyed. Today, we explored how to break this rule and make our container data persistent by bridging the container's file system with our physical host machine.
 
 ### 1. The Ephemeral Storage Problem
+
 To prove that containers have amnesia, we spun up a temporary Ubuntu container:
+
 ```bash
 docker run -it --rm ubuntu
 ```
+
 Inside, we created a secret file:
+
 ```bash
 cat > secret.txt
 I am a secret XD..
 ^C
 ```
-*(When we exited, the `--rm` flag deleted the container. The `secret.txt` file was completely wiped from existence because it was stored in the container's temporary Writable Layer).*
+
+_(When we exited, the `--rm` flag deleted the container. The `secret.txt` file was completely wiped from existence because it was stored in the container's temporary Writable Layer)._
 
 > **📝 Quick Note: The Magic of `cat`**
 > How did we create that file without a text editor? The `>` and `>>` symbols are Linux redirect operators.
-> *   `cat > filename.txt`: Takes whatever we type in the terminal and **overwrites** (or creates) the file.
-> *   `cat >> filename.txt`: **Appends** our typed text to the very bottom of an existing file without deleting what is already there.
+>
+> - `cat > filename.txt`: Takes whatever we type in the terminal and **overwrites** (or creates) the file.
+> - `cat >> filename.txt`: **Appends** our typed text to the very bottom of an existing file without deleting what is already there.
 
 ### 2. What exactly is a "Volume"?
+
 In Docker, a "Volume" is a broad term for a storage mechanism that completely bypasses the container's temporary OverlayFS (Copy-on-Write) file system. Instead of writing data into the container's fragile top layer, a volume creates a direct wormhole to a safe, permanent folder sitting on the physical host machine's hard drive.
 
 ### 3. The Solution: Bind Mounts (`-v`)
+
 If we have a folder on our host machine (e.g., `/home/prash/Desktop/docker-journey`), we can mount it directly inside the container. We use the `-v` (volume) flag, mapping the paths exactly like we map ports: `<absolute-host-path>:<absolute-container-path>`.
 
 ```bash
@@ -930,22 +938,109 @@ docker run -it -v /home/prash/Desktop/docker-journey:/home/ubuntu/my-docker ubun
 ```
 
 #### The Real-Time Sync Experiment
+
 Once inside the container, we navigated to our mapped folder and created a file:
+
 ```bash
 root@c51d15d98a4a:/home/ubuntu/my-docker# cat > temp.txt
 hello
 ^C
-root@c51d15d98a4a:/home/ubuntu/my-docker# cat temp.txt 
+root@c51d15d98a4a:/home/ubuntu/my-docker# cat temp.txt
 hello
 ```
+
 **The Result:** The moment we pressed `Ctrl+C`, `temp.txt` instantly appeared on our host machine's desktop folder. It is a real-time, bi-directional sync. If we delete the container, `temp.txt` remains perfectly safe on our host machine.
 
 ### 4. Engineering Use-Cases (The "Deep Why")
+
 Why is this simple mounting mechanism so powerful in DevOps?
 
-1.  **Cross-OS Tooling:** We might need to run a highly specific tool that *only* works on Linux (like certain C++ compilers or pentesting scripts). Even if our host is a Mac or Windows machine, we can mount our local code into a Linux container, let the Linux container process the files, and the finished results will magically output directly back to our Mac/Windows hard drive.
+1.  **Cross-OS Tooling:** We might need to run a highly specific tool that _only_ works on Linux (like certain C++ compilers or pentesting scripts). Even if our host is a Mac or Windows machine, we can mount our local code into a Linux container, let the Linux container process the files, and the finished results will magically output directly back to our Mac/Windows hard drive.
 2.  **Live Code Editing:** For web development, we can mount our source code into a Node.js container. When we edit `index.js` in VS Code on our host laptop, the container instantly sees the changes and restarts the server. No rebuilding images required!
-3.  **Shared State:** A single host folder can be mounted into *multiple* containers at the same time. Container A can write data to a file, and Container B can instantly read that exact same file.
+3.  **Shared State:** A single host folder can be mounted into _multiple_ containers at the same time. Container A can write data to a file, and Container B can instantly read that exact same file.
+
+---
+
+## 🗄️ Day 12: Named Volumes and Managed Storage
+
+Yesterday, we used **Bind Mounts** to link a specific folder on our physical host machine (`/home/prash/...`) to a container. Today, we explored **Named Volumes**, which completely decouple our data from our host machine's file system and hand storage management entirely over to Docker.
+
+### 1. The Bind Mount Problem
+
+Bind mounts are great for local development, but they have a fatal flaw for production: they are **OS-dependent**. A bind mount path like `/home/ubuntu/...` works on Linux, but if another developer pulls our code on Windows, the container will crash because that path does not exist.
+
+To fix this, we use **Named Volumes**.
+
+### 2. Creating a Managed Volume
+
+We can ask Docker to carve out a permanent, secure chunk of storage for us without ever telling it exactly _where_ to put it on the host hard drive:
+
+```bash
+docker volume create custom_data
+
+# Verify it exists
+docker volume ls
+```
+
+- **The Deep Why:** When we create a named volume, Docker silently provisions a highly optimized directory deep inside Linux (usually at `/var/lib/docker/volumes/custom_data/_data`). We never interact with this folder directly; Docker manages the permissions and storage mechanics for us.
+
+### 3. Data Sharing Between Containers
+
+To prove that volumes are independent of the containers that use them, we spun up multiple different containers and attached them to the same volume pool.
+
+**Step A: The Ubuntu Writer**
+
+```bash
+docker run -it --rm -v custom_data:/server ubuntu
+```
+
+Inside this container, we navigated to `/server` and created a file:
+
+```bash
+cat >> ubuntu.txt
+This is the file created by ubuntu...
+```
+
+**Step B: The Busybox Reader/Writer**
+We destroyed the Ubuntu container and spun up a completely different OS (`busybox`), attaching the exact same volume:
+
+```bash
+docker run -it --rm -v custom_data:/server busybox
+```
+
+Running `ls /server` revealed `ubuntu.txt` was still perfectly intact! We then added a second file: `busybox.txt`.
+
+### 4. Path Independence
+
+A volume is just a floating pool of data. It does not care _where_ it gets mounted inside a container. We proved this by spinning up a third container and mounting `custom_data` to a completely different internal directory:
+
+```bash
+docker run -it --rm -v custom_data:/home/ubuntu/custom ubuntu
+```
+
+When we ran `ls /home/ubuntu/custom`, both `ubuntu.txt` and `busybox.txt` were sitting right there. Multiple containers can mount the exact same volume simultaneously, even if they mount it to completely different internal folder paths.
+
+---
+
+### 💡 Did You Know? (CLI Parsing & Anonymous Volumes)
+
+When we originally typed our command today, we made a tiny typo that revealed a massive underlying mechanic in Docker's CLI:
+
+```bash
+# What we typed:
+docker run -it -v --rm -v custom_data:/server ubuntu
+```
+
+When we ran `ls` inside the container, a weird folder literally named `--rm` appeared at the root of the file system! Furthermore, when we ran `docker volume ls` later, a massive random hash (`d2429299a519...`) had mysteriously appeared in our volume list alongside `custom_data`.
+
+**The Deep Why:**
+Docker parses commands exactly as they are written. By writing `-v --rm`, we accidentally triggered the creation of an **Anonymous Volume**.
+
+- Because we didn't include a colon (like `<host>:<container>`), Docker assumed `--rm` was the destination path _inside_ the container.
+- It automatically generated a random hashed volume (the long string we saw in `docker volume ls`) and mounted it to a literal folder named `/--rm` inside our container!
+
+_(The correct syntax simply moves the flag: `docker run -it --rm -v custom_data:/server ubuntu`)_. This quirk perfectly demonstrates how Docker handles incomplete volume declarations on the fly!
+
 ---
 
 <p align="center" dir="auto">
