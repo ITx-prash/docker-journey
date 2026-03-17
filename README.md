@@ -1041,6 +1041,111 @@ Docker parses commands exactly as they are written. By writing `-v --rm`, we acc
 
 _(The correct syntax simply moves the flag: `docker run -it --rm -v custom_data:/server ubuntu`)_. This quirk perfectly demonstrates how Docker handles incomplete volume declarations on the fly!
 
+
+## 🐙 Day 13: Docker Compose and Infrastructure as Code
+
+Up until today, we managed containers imperatively—typing long, complex `docker run` commands one by one. Today, we explored **Docker Compose**, a tool that allows us to define and orchestrate entire multi-container applications declaratively using a single YAML file.
+
+### 1. The Local Development Nightmare (The "Deep Why")
+To understand why we need Docker Compose, we wrote a Node.js server that connects to both Redis and PostgreSQL:
+
+```typescript
+// Excerpt from our Node.js App
+const redis = new Redis("redis://redis:6379");
+const client = new Client({ host: "db", port: 5432, database: "postgres" });
+```
+
+When we tried to run this locally (`npm run start`), the application crashed immediately:
+```text
+[ioredis] Unhandled error event: Error: getaddrinfo ENOTFOUND redis
+Error Starting Server Error: Connection is closed.
+```
+**The Problem:** Our host machine does not have Redis or PostgreSQL installed. 
+Without Docker, we would have to manually install these databases on our physical laptop. If a new developer joined our team, we would have to write a complex guide telling them exactly which versions of Postgres and Redis to install. This causes the classic "It works on my machine" problem.
+
+### 2. The Docker Compose Solution
+Instead of installing databases locally or typing multiple messy `docker run` commands, we define our infrastructure as code in a `docker-compose.yml` file. 
+
+In Compose terminology, every container is referred to as a **Service**.
+
+We started by defining just our PostgreSQL database:
+```yaml
+name: e-commerce
+
+services:
+  db:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_PASSWORD: "1234"
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+```
+*   *Note:* This YAML block is the exact, 1-to-1 equivalent of typing: `docker run -it --name postgres -p 5432:5432 -e POSTGRES_PASSWORD="1234" ... postgres:16`.
+
+### 3. Scaling the Infrastructure
+Next, we added our Redis cache to the same file. We also introduced the `depends_on` keyword to control the startup order, ensuring our cache only starts after our database is initialized.
+
+```yaml
+name: e-commerce
+
+services:
+  db:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_PASSWORD: "1234"
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    depends_on:
+      - db
+    ports:
+      - "6379:6379"
+```
+
+### 4. The Magic Commands (`up` and `down`)
+With our infrastructure defined, we can spin up the entire database stack with a single command:
+
+```bash
+⚡prash ❯❯ docker compose up -d
+
+[+] Running 14/14
+ ✔ Image redis:7-alpine       Pulled                             8.8s
+ ✔ Network e-commerce_default Created                            0.0s
+ ✔ Container postgres         Started                            0.6s
+ ✔ Container redis            Started                            0.7s
+```
+Now, when we run our Node.js app locally, it successfully connects to the Dockerized databases:
+```text
+⚡prash ❯❯ npm run build && npm start
+
+Connecting Redis...
+Redis Connection Success...
+Connecting Postgres...
+Postgres Connection Success...
+Http server is listening on PORT 8000
+```
+
+When we are done working for the day, we simply run:
+```bash
+docker compose down
+```
+This safely stops the containers, destroys the default network, and leaves our host machine perfectly clean.
+
+### 5. Architectural Insight: Networks and Port Mapping
+When we ran `docker compose up`, Docker automatically created a custom bridge network for us (named `e-commerce_default`). Because both `db` and `redis` are inside this same network, they can communicate with each other privately without any port mapping.
+
+**Why did we use `ports: - "5432:5432"`?**
+We only mapped the ports because our Node.js application is currently running *outside* of the Docker network (directly on our host machine). If we were to also containerize our Node.js application and add it as a third service in our `docker-compose.yml`, we could completely remove the `ports` mappings for Redis and Postgres, hiding them securely from the host machine and the outside world!
+
 ---
 
 <p align="center" dir="auto">
