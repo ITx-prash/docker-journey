@@ -1041,12 +1041,12 @@ Docker parses commands exactly as they are written. By writing `-v --rm`, we acc
 
 _(The correct syntax simply moves the flag: `docker run -it --rm -v custom_data:/server ubuntu`)_. This quirk perfectly demonstrates how Docker handles incomplete volume declarations on the fly!
 
-
 ## 🐙 Day 13: Docker Compose and Infrastructure as Code
 
 Up until today, we managed containers imperatively—typing long, complex `docker run` commands one by one. Today, we explored **Docker Compose**, a tool that allows us to define and orchestrate entire multi-container applications declaratively using a single YAML file.
 
 ### 1. The Local Development Nightmare (The "Deep Why")
+
 To understand why we need Docker Compose, we wrote a Node.js server that connects to both Redis and PostgreSQL:
 
 ```typescript
@@ -1056,19 +1056,23 @@ const client = new Client({ host: "db", port: 5432, database: "postgres" });
 ```
 
 When we tried to run this locally (`npm run start`), the application crashed immediately:
+
 ```text
 [ioredis] Unhandled error event: Error: getaddrinfo ENOTFOUND redis
 Error Starting Server Error: Connection is closed.
 ```
-**The Problem:** Our host machine does not have Redis or PostgreSQL installed. 
+
+**The Problem:** Our host machine does not have Redis or PostgreSQL installed.
 Without Docker, we would have to manually install these databases on our physical laptop. If a new developer joined our team, we would have to write a complex guide telling them exactly which versions of Postgres and Redis to install. This causes the classic "It works on my machine" problem.
 
 ### 2. The Docker Compose Solution
-Instead of installing databases locally or typing multiple messy `docker run` commands, we define our infrastructure as code in a `docker-compose.yml` file. 
+
+Instead of installing databases locally or typing multiple messy `docker run` commands, we define our infrastructure as code in a `docker-compose.yml` file.
 
 In Compose terminology, every container is referred to as a **Service**.
 
 We started by defining just our PostgreSQL database:
+
 ```yaml
 name: e-commerce
 
@@ -1083,9 +1087,11 @@ services:
     ports:
       - "5432:5432"
 ```
-*   *Note:* This YAML block is the exact, 1-to-1 equivalent of typing: `docker run -it --name postgres -p 5432:5432 -e POSTGRES_PASSWORD="1234" ... postgres:16`.
+
+- _Note:_ This YAML block is the exact, 1-to-1 equivalent of typing: `docker run -it --name postgres -p 5432:5432 -e POSTGRES_PASSWORD="1234" ... postgres:16`.
 
 ### 3. Scaling the Infrastructure
+
 Next, we added our Redis cache to the same file. We also introduced the `depends_on` keyword to control the startup order, ensuring our cache only starts after our database is initialized.
 
 ```yaml
@@ -1112,6 +1118,7 @@ services:
 ```
 
 ### 4. The Magic Commands (`up` and `down`)
+
 With our infrastructure defined, we can spin up the entire database stack with a single command:
 
 ```bash
@@ -1123,7 +1130,9 @@ With our infrastructure defined, we can spin up the entire database stack with a
  ✔ Container postgres         Started                            0.6s
  ✔ Container redis            Started                            0.7s
 ```
+
 Now, when we run our Node.js app locally, it successfully connects to the Dockerized databases:
+
 ```text
 ⚡prash ❯❯ npm run build && npm start
 
@@ -1135,16 +1144,137 @@ Http server is listening on PORT 8000
 ```
 
 When we are done working for the day, we simply run:
+
 ```bash
 docker compose down
 ```
+
 This safely stops the containers, destroys the default network, and leaves our host machine perfectly clean.
 
 ### 5. Architectural Insight: Networks and Port Mapping
+
 When we ran `docker compose up`, Docker automatically created a custom bridge network for us (named `e-commerce_default`). Because both `db` and `redis` are inside this same network, they can communicate with each other privately without any port mapping.
 
 **Why did we use `ports: - "5432:5432"`?**
-We only mapped the ports because our Node.js application is currently running *outside* of the Docker network (directly on our host machine). If we were to also containerize our Node.js application and add it as a third service in our `docker-compose.yml`, we could completely remove the `ports` mappings for Redis and Postgres, hiding them securely from the host machine and the outside world!
+We only mapped the ports because our Node.js application is currently running _outside_ of the Docker network (directly on our host machine). If we were to also containerize our Node.js application and add it as a third service in our `docker-compose.yml`, we could completely remove the `ports` mappings for Redis and Postgres, hiding them securely from the host machine and the outside world!
+
+---
+
+## 🕸️ Day 14: Compose Networking and Persistent Volumes
+
+When we define infrastructure as code, we must ensure that our databases are secure and that our data survives container restarts. Today, we upgraded our `docker-compose.yml` to include strict network isolation and persistent state.
+
+### 1. Default vs. Custom Networking
+
+By default, Docker Compose automatically creates a single bridge network (named `<project_name>_default`, like `e-commerce_default`). All services defined in the YAML file are attached to this network and can communicate with each other using their service names (e.g., `redis` can ping `db`).
+
+While the default network is perfectly fine for most local development, production environments require stricter security. We can define custom networks to enforce **Micro-segmentation**.
+
+We updated our Compose file to define two separate networks: `frontend` and `backend`:
+
+```yaml
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+```
+
+- **The Deep Why:** By assigning the `db` service to both `frontend` and `backend`, but assigning `redis` _only_ to `frontend`, we create a firewall. If a malicious actor compromises the Redis container, they are physically unable to send network packets to the isolated backend database.
+
+### 2. The Amnesia Problem (Volumes in Compose)
+
+Databases (like PostgreSQL and Redis) are **Stateful Services**. If we run `docker compose down`, the containers are destroyed. When we run `docker compose up` again, our databases will be completely empty because the Writable Layer was deleted.
+
+To fix this, we declare **Named Volumes** at the bottom of our YAML file and map them directly into the specific folders where the databases store their internal data.
+
+```yaml
+volumes:
+  postgres_data:
+  redis_data:
+```
+
+### 3. The Final Architecture
+
+Here is our completed `docker-compose.yml` featuring custom networks and persistent volumes:
+
+```yaml
+name: e-commerce
+
+services:
+  db:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_PASSWORD: "1234"
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    networks:
+      - frontend
+      - backend
+    volumes:
+      # Maps our named volume to the official Postgres data directory
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    depends_on:
+      - db
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - frontend
+    volumes:
+      # Maps our named volume to the official Redis data directory
+      - redis_data:/data
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+```
+
+When we bring this infrastructure online, Docker Compose orchestrates the creation of all networks, volumes, and containers simultaneously:
+
+```bash
+⚡prash ❯❯ docker compose up -d
+[+] up 5/5
+ ✔ Network e-commerce_backend      Created                                                                                                                            0.0s
+ ✔ Network e-commerce_frontend     Created                                                                                                                            0.0s
+ ✔ Volume e-commerce_postgres_data Created                                                                                                                            0.0s
+ ✔ Container postgres              Started                                                                                                                            0.4s
+ ✔ Container redis                 Started
+```
+
+---
+
+### 💡 Did You Know?
+
+**The Complete Wipe (`docker compose down -v`)**
+
+When we type `docker compose down`, Docker purposefully deletes our containers and custom networks, but it **leaves our volumes completely untouched**. It assumes we do not want to accidentally delete our production database data just because we restarted our servers!
+
+However, during local development, we often mess up our database and want to start with a completely fresh, empty slate. We can force Docker Compose to destroy the persistent volumes as well by passing the `-v` (volumes) flag:
+
+```bash
+⚡prash ❯❯ docker compose down -v
+[+] down 5/5
+ ✔ Container redis                 Removed
+ ✔ Container postgres              Removed
+ ✔ Volume e-commerce_postgres_data Removed
+ ✔ Network e-commerce_backend      Removed
+ ✔ Network e-commerce_frontend     Removed
+```
+
+This is the ultimate "factory reset" button for our local infrastructure.
 
 ---
 
