@@ -10,6 +10,11 @@ services: #ig each items inside the service is a container
       POSTGRES_DB: postgres
     ports:
       - "5432:5432"
+    networks:
+      - frontend
+      - backend
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
   #somewhat similar to: docker run -it --name postgres -e POSTGRES_PASSWORD: "1234" postgres:16
 
@@ -20,3 +25,18 @@ services: #ig each items inside the service is a container
     container_name: redis
     ports:
       - "6379:6379"
+    networks:
+      - frontend
+    volumes:
+      - redis_data:/data  
+
+# we generally use the same network for all our containers, but we can also separate them into different networks if we want to. For example, we can have a frontend network for our web application and a backend network for our database and cache. This way, we can control the communication between the containers and improve security. but generally the default network is fine for most use cases.
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
